@@ -1,0 +1,25 @@
+{
+  "name": "my_detailed_node_breaker_plan",
+  "mode": "SMOOTH",
+  "movable_switches": [],
+  "fixed_switches": [],
+  "protected_equipment": [],
+  "source_equipment": [],
+  "load_equipment": [],
+  "switch_roles": {
+    "COUPLER_DJ": "COUPLER",
+    "SECTIONING_SA": "SECTIONING"
+  },
+  "busbars": {
+    "BBS_1": {"group": "B1", "section": "S1"},
+    "BBS_2": {"group": "B2", "section": "S1"}
+  },
+  "constraints": {
+    "allow_protected_outage": false,
+    "allow_unsafe_multi_busbar": false,
+    "max_temporary_outages": 1,
+    "enforce_disconnector_offload_rule": true,
+    "enforce_sectioning_rule": true,
+    "strict_sectioning_without_sources": false
+  }
+}
