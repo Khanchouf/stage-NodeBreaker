@@ -7,6 +7,9 @@ from itertools import count
 from math import inf
 from typing import Callable, Iterable
 
+from .antecedents import AntecedentEnumeration, enumerate_antecedents, retarget_problem
+from .partition import NodalPartition, partition_distance
+from .projection import NodeBreakerProjection
 from .model import (
     CellKind,
     NetworkState,
@@ -65,6 +68,37 @@ class SearchResult:
     generated_states: int
     reopened_states: int
     cache_statistics: CacheStatistics
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AntecedentSearchSummary:
+    target_state: NetworkState
+    found: bool
+    total_cost: int | None
+    expanded_states: int
+    generated_states: int
+    reopened_states: int
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class NodalSearchResult:
+    """Result of the exact "enumerate fibre, then A*" formulation."""
+
+    found: bool
+    target_partition: NodalPartition
+    antecedents: AntecedentEnumeration
+    best_target_state: NetworkState | None
+    best_problem: PlanningProblem | None
+    best_result: SearchResult | None
+    summaries: tuple[AntecedentSearchSummary, ...]
+    attempted_antecedents: int
+    solved_antecedents: int
+    total_expanded_states: int
+    total_generated_states: int
+    total_reopened_states: int
+    exact_global_optimum_guaranteed: bool
     message: str = ""
 
 
@@ -326,6 +360,8 @@ class PlanningSession:
             "zero_evaluations": self._heuristic_evaluations.get("zero", 0),
             "hamming_evaluations": self._heuristic_evaluations.get("hamming", 0),
             "expert_evaluations": self._heuristic_evaluations.get("expert", 0),
+            "topological_evaluations": self._heuristic_evaluations.get("topological", 0),
+            "combined_evaluations": self._heuristic_evaluations.get("combined", 0),
             "expert_stronger_than_hamming": self._expert_stronger_evaluations,
             "expert_equal_to_hamming": self._expert_equal_evaluations,
         }
@@ -350,6 +386,34 @@ def hamming_heuristic(
         1
         for switch, current in zip(problem.switches, state.closed_bits, strict=True)
         if current != switch.target_closed
+    )
+
+
+def topological_heuristic(
+    state: NetworkState,
+    problem: PlanningProblem,
+    topology: TopologyEngine,
+) -> int:
+    """Nodal partition distance to the detailed target's nodal topology.
+
+    During nodal planning, ``problem`` has already been retargeted to one
+    antecedent of T*.  Every such antecedent projects to the same T*, so this
+    value is independent of which antecedent is currently being solved.
+    """
+
+    current = topology.nodal_partition(state)
+    target = topology.nodal_partition(NetworkState.target(problem))
+    return partition_distance(current, target)
+
+
+def combined_heuristic(
+    state: NetworkState,
+    problem: PlanningProblem,
+    topology: TopologyEngine,
+) -> int:
+    return max(
+        expert_double_busbar_heuristic(state, problem, topology),
+        topological_heuristic(state, problem, topology),
     )
 
 
@@ -384,8 +448,8 @@ def expert_heuristic_details(
       by cutting the feeder;
     * TRANSFER: establish an external parallel connection between the two
       busbars. ``TopologyEngine.minimum_auxiliary_connection_cost`` computes an
-      optimistic extra cost beyond Hamming. Logical constraints are relaxed, so
-      this can only underestimate the real transfer cost.
+      optimistic extra cost beyond Hamming. It counts only auxiliary operations
+      that are not already counted by Hamming, so it remains a lower bound.
 
     The minimum of these two strategy bounds is still a lower bound. Several
     cells sharing the same busbar pair are grouped together so that a common
@@ -533,6 +597,8 @@ HEURISTICS: dict[str, Heuristic] = {
     "zero": zero_heuristic,
     "hamming": hamming_heuristic,
     "expert": expert_double_busbar_heuristic,
+    "topological": topological_heuristic,
+    "combined": combined_heuristic,
 }
 
 
@@ -652,6 +718,131 @@ def astar_search(
         reopened,
         session.topology.statistics(),
         "Aucun plan trouvé dans la limite de recherche.",
+    )
+
+
+def astar_over_antecedents(
+    problem: PlanningProblem,
+    target_partition: NodalPartition,
+    *,
+    heuristic: str = "expert",
+    max_expansions: int | None = None,
+    max_assignments: int | None = None,
+) -> NodalSearchResult:
+    """Solve min_{xf in pi^-1(T*)} d_M(x0, xf) exactly when uncapped.
+
+    The fibre is explicitly enumerated.  A fresh detailed target problem is
+    then created for every admissible antecedent, allowing the existing A* and
+    the existing Hamming/expert heuristic machinery to be reused unchanged.
+
+    With ``max_assignments is None`` and ``max_expansions is None``, every
+    admissible antecedent is considered and every A* run is complete; the best
+    returned cost is therefore the global optimum over the nodal target fibre.
+    """
+
+    if heuristic not in HEURISTICS:
+        raise ValueError(f"Heuristique inconnue : {heuristic}")
+
+    base_topology = TopologyEngine(problem)
+    base_session = PlanningSession(problem, topology=base_topology)
+    projection = NodeBreakerProjection(problem, base_topology)
+
+    antecedents = enumerate_antecedents(
+        problem,
+        target_partition,
+        topology=base_topology,
+        projection=projection,
+        state_validator=lambda state: base_session.validate_state(state).valid,
+        max_assignments=max_assignments,
+    )
+
+    summaries: list[AntecedentSearchSummary] = []
+    best_target: NetworkState | None = None
+    best_problem: PlanningProblem | None = None
+    best_result: SearchResult | None = None
+    solved = 0
+    total_expanded = 0
+    total_generated = 0
+    total_reopened = 0
+
+    for index, target_state in enumerate(antecedents.states, start=1):
+        target_problem = retarget_problem(
+            problem,
+            target_state,
+            name=f"{problem.name}__nodal_antecedent_{index}",
+        )
+        result = astar_search(
+            target_problem,
+            heuristic=heuristic,
+            max_expansions=max_expansions,
+        )
+        total_expanded += result.expanded_states
+        total_generated += result.generated_states
+        total_reopened += result.reopened_states
+        if result.found:
+            solved += 1
+
+        summaries.append(
+            AntecedentSearchSummary(
+                target_state=target_state,
+                found=result.found,
+                total_cost=result.total_cost,
+                expanded_states=result.expanded_states,
+                generated_states=result.generated_states,
+                reopened_states=result.reopened_states,
+                message=result.message,
+            )
+        )
+
+        if not result.found or result.total_cost is None:
+            continue
+        if (
+            best_result is None
+            or best_result.total_cost is None
+            or result.total_cost < best_result.total_cost
+            or (
+                result.total_cost == best_result.total_cost
+                and result.expanded_states < best_result.expanded_states
+            )
+        ):
+            best_target = target_state
+            best_problem = target_problem
+            best_result = result
+
+    exact = not antecedents.truncated and max_expansions is None
+
+    if not antecedents.states:
+        message = (
+            "Aucun antécédent admissible de la topologie nodale cible n'a été trouvé."
+        )
+    elif best_result is None:
+        message = "Des antécédents existent, mais aucun plan n'a été trouvé."
+    elif exact:
+        message = (
+            "Optimum global obtenu sur tous les antécédents admissibles de la "
+            "topologie nodale cible."
+        )
+    else:
+        message = (
+            "Meilleure solution trouvée dans une recherche limitée ; l'optimalité "
+            "globale sur toute la fibre n'est pas garantie."
+        )
+
+    return NodalSearchResult(
+        found=best_result is not None,
+        target_partition=target_partition,
+        antecedents=antecedents,
+        best_target_state=best_target,
+        best_problem=best_problem,
+        best_result=best_result,
+        summaries=tuple(summaries),
+        attempted_antecedents=len(antecedents.states),
+        solved_antecedents=solved,
+        total_expanded_states=total_expanded,
+        total_generated_states=total_generated,
+        total_reopened_states=total_reopened,
+        exact_global_optimum_guaranteed=exact and best_result is not None,
+        message=message,
     )
 
 

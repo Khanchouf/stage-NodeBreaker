@@ -7,6 +7,8 @@ from typing import Iterable
 
 import networkx as nx
 
+from .partition import NodalPartition
+
 from .model import (
     CellKind,
     CellSpec,
@@ -282,6 +284,9 @@ class TopologyEngine:
         self._excluded_misses = 0
         self._outside_hits = 0
         self._outside_misses = 0
+        self._nodal_partition_cache: dict[
+            tuple[tuple[bool, ...], bool], NodalPartition
+        ] = {}
 
     def statistics(self) -> CacheStatistics:
         return CacheStatistics(
@@ -365,6 +370,63 @@ class TopologyEngine:
         )
         self._snapshot_cache[state.closed_bits] = result
         return result
+
+    def observable_nodes(self, *, include_busbars: bool = True) -> dict[str, int]:
+        """Return the observable objects used by the nodal projection.
+
+        Internal Node/Breaker connectivity nodes are deliberately not
+        observables.  Each equipment terminal is an observable object.  A
+        single-terminal equipment keeps the compact identifier
+        ``EQUIPMENT::<id>``; multi-terminal equipment uses ``::T1``, ``::T2``,
+        ... so that each terminal belongs to exactly one nodal class.  Busbar
+        sections are included by default because their identity matters for
+        double-busbar manoeuvres.
+        """
+
+        result: dict[str, int] = {}
+        if include_busbars:
+            for node_index, busbar_id in sorted(
+                self.context.busbar_node_to_id.items(), key=lambda item: item[1]
+            ):
+                result[f"BUSBAR::{busbar_id}"] = node_index
+
+        for equipment_id in sorted(self.context.equipment_nodes):
+            nodes = self.context.equipment_nodes[equipment_id]
+            if len(nodes) == 1:
+                result[f"EQUIPMENT::{equipment_id}"] = nodes[0]
+            else:
+                for terminal_index, node_index in enumerate(nodes, start=1):
+                    result[f"EQUIPMENT::{equipment_id}::T{terminal_index}"] = node_index
+        return result
+
+    def nodal_partition(
+        self,
+        state: NetworkState,
+        *,
+        include_busbars: bool = True,
+    ) -> NodalPartition:
+        """Project a detailed Node/Breaker state onto its nodal topology.
+
+        The returned partition is exactly the quotient of the observable
+        objects by conductive connectivity in the current graph.
+        """
+
+        key = (state.closed_bits, include_busbars)
+        cached = self._nodal_partition_cache.get(key)
+        if cached is not None:
+            return cached
+
+        snap = self.snapshot(state)
+        blocks_by_component: dict[int, set[str]] = {}
+        for observable, node_index in self.observable_nodes(
+            include_busbars=include_busbars
+        ).items():
+            component = snap.component_by_node[node_index]
+            blocks_by_component.setdefault(component, set()).add(observable)
+
+        partition = NodalPartition.from_blocks(blocks_by_component.values())
+        self._nodal_partition_cache[key] = partition
+        return partition
 
     def connected(self, state: NetworkState, node1: str, node2: str) -> bool:
         snap = self.snapshot(state)
@@ -450,9 +512,10 @@ class TopologyEngine:
     ) -> int | None:
         """Optimistic extra-operation cost to connect two busbars.
 
-        This method is used only by the expert heuristic. It builds a relaxed
-        connectivity problem in which logical switching constraints are ignored.
-        Therefore the returned value is a lower bound, not an executable plan.
+        This method is used only by the expert heuristic. It computes an
+        optimistic connectivity cost while deliberately ignoring operational
+        prerequisites that can only add manoeuvres. The returned value is
+        therefore a lower bound, not an executable plan.
 
         Edge cost is measured *in addition to the global Hamming bound*:
         - an already closed switch costs 0;
