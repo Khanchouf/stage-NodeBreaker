@@ -9,57 +9,44 @@
   )
 
   (:types
-    node
+    nb-entity - object
+
+    node switch cell busbar equipment - nb-entity
+
     busbar-node equipment-node internal-node - node
-    switch
+
     breaker disconnector load-break-switch - switch
-    cell departure-cell coupling-cell sectioning-cell omnibus-cell internal-cell - cell
-    busbar
-    equipment
+
+    departure-cell coupling-cell sectioning-cell omnibus-cell internal-cell - cell
   )
 
   (:predicates
-    ;; Dynamic switch state
     (closed ?s - switch)
     (fixed ?s - switch)
-
-    ;; Static Node-Breaker structure
     (endpoint-1 ?s - switch ?n - node)
     (endpoint-2 ?s - switch ?n - node)
     (internal-link ?n1 - node ?n2 - node)
     (busbar-at ?b - busbar ?n - busbar-node)
     (equipment-at ?e - equipment ?n - equipment-node)
-
-    ;; Functional structure
     (in-cell ?s - switch ?c - cell)
     (contains-equipment ?c - cell ?e - equipment)
     (protects ?b - breaker ?c - cell)
     (load-break-protects ?s - load-break-switch ?c - cell)
     (disconnector-to-bar ?d - disconnector ?c - cell ?b - busbar)
     (cell-connected-to ?c - cell ?b - busbar)
-
-    ;; Local derived state maintained by actions
     (cell-isolated ?c - cell)
     (cell-prepared ?c - cell)
     (cell-in-service ?c - cell)
     (double-connected ?c - cell)
-
-    ;; Bus coupling metadata
     (couples ?s - switch ?b1 - busbar ?b2 - busbar)
     (bars-coupled ?b1 - busbar ?b2 - busbar)
-
-    ;; Equipment properties and local operational constraints
     (protected-equipment ?e - equipment)
     (source-equipment ?e - equipment)
     (load-equipment ?e - equipment)
     (protected-cell ?c - cell)
     (tracks-temporary-outage ?c - cell)
-
-    ;; Sectioning is only enabled when externally authorized/generated.
     (sectioning-device ?s - disconnector)
     (sectioning-authorized ?s - disconnector)
-
-    ;; Metadata: the resulting plan still requires electrical replay.
     (requires-synchronism-check ?s - switch)
     (requires-electrical-replay ?s - switch)
   )
@@ -141,7 +128,6 @@
     )
   )
 
-  ;; Long-loop / isolated-cell disconnector operations.
   (:action close-disconnector-isolated
     :parameters (?d - disconnector ?c - cell ?b - busbar)
     :precondition (and
@@ -175,7 +161,6 @@
     )
   )
 
-  ;; Short-loop transfer using an explicitly represented direct bus coupling.
   (:action close-disconnector-short-loop
     :parameters (?d - disconnector ?c - cell ?target - busbar ?current - busbar)
     :precondition (and
@@ -273,3 +258,5 @@
     )
   )
 )
+
+

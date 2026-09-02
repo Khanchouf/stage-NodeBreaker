@@ -69,6 +69,18 @@ def enumerate_antecedents(
     topology = topology or TopologyEngine(problem)
     projection = projection or NodeBreakerProjection(problem, topology)
 
+    assignable_switches = tuple(
+        switch for switch in problem.switches if not switch.fixed
+    )
+
+    print("=" * 80)
+    print("ANTECEDENT ENUMERATION")
+    print("=" * 80)
+    print("Nombre de switches variables :", len(assignable_switches))
+    print("Nombre de configurations possibles :", 2 ** len(assignable_switches))
+    print("=" * 80)
+
+
     expected_universe = projection.initial_partition().universe
     if target_partition.universe != expected_universe:
         missing = sorted(expected_universe - target_partition.universe)
